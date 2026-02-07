@@ -50,7 +50,7 @@ func (c *Client) doAuthorizedRequest(ctx context.Context, method, url string, bo
 
 // getGrills fetches the user's grills from the Traeger API.
 func (c *Client) getGrills(ctx context.Context) ([]Grill, error) {
-	resp, err := c.doAuthorizedRequest(ctx, "GET", apiBaseURL+"/users/self", nil)
+	resp, err := c.doAuthorizedRequest(ctx, "GET", c.apiURL+"/users/self", nil)
 	if err != nil {
 		return nil, fmt.Errorf("traeger: get grills: %w", err)
 	}
@@ -71,7 +71,7 @@ func (c *Client) getGrills(ctx context.Context) ([]Grill, error) {
 
 // sendCommand sends a raw command to a grill.
 func (c *Client) sendCommand(ctx context.Context, thingName, command string) error {
-	url := fmt.Sprintf("%s/things/%s/commands", apiBaseURL, thingName)
+	url := fmt.Sprintf("%s/things/%s/commands", c.apiURL, thingName)
 	data, err := json.Marshal(map[string]string{"command": command})
 	if err != nil {
 		return fmt.Errorf("traeger: marshal command: %w", err)
@@ -89,7 +89,7 @@ func (c *Client) sendCommand(ctx context.Context, thingName, command string) err
 func (c *Client) getMQTTCredentials(ctx context.Context) (signedURL string, expiresAt time.Time, err error) {
 	requestTime := time.Now()
 
-	resp, err := c.doAuthorizedRequest(ctx, "POST", apiBaseURL+"/mqtt-connections", nil)
+	resp, err := c.doAuthorizedRequest(ctx, "POST", c.apiURL+"/mqtt-connections", nil)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("traeger: get mqtt credentials: %w", err)
 	}

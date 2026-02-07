@@ -9,6 +9,10 @@ A Go SDK for the Traeger grill IoT API. Connect to your Traeger WiFIRE-enabled g
 
 > **Disclaimer:** This project is not affiliated with, endorsed by, or sponsored by Traeger. All product names, trademarks, and registered trademarks are the property of their respective owners. This SDK was built by reverse-engineering the publicly accessible mobile app API for personal and educational use.
 
+## Raw API Reference
+
+If you're working in another language or want to interact with the Traeger API directly without using the Go SDK, see [docs/api.md](docs/api.md) for the full HTTP/MQTT API reference.
+
 ## Installation
 
 ```bash

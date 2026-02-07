@@ -50,7 +50,7 @@ func (c *Client) authenticate(ctx context.Context) (*authResponse, error) {
 		return nil, fmt.Errorf("traeger: marshal auth request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", authEndpoint, bytes.NewReader(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.authURL, bytes.NewReader(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("traeger: create auth request: %w", err)
 	}
