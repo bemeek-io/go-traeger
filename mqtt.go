@@ -48,20 +48,87 @@ func (c *Client) connectMQTT(ctx context.Context) error {
 	return nil
 }
 
-// refreshMQTTURL refreshes the signed MQTT URL if it is close to expiry.
-func (c *Client) refreshMQTTURL(ctx context.Context) error {
-	remaining := time.Until(c.mqttURLExpires)
-	if remaining > c.tokenRefreshBuffer {
-		return nil
-	}
+// mqttKeepAlive runs in the background and reconnects the MQTT client before
+// the signed WebSocket URL expires (typically every ~1 hour). It stops when
+// the done channel is closed (via Close).
+func (c *Client) mqttKeepAlive() {
+	// Capture done channel once so Close() setting c.done = nil doesn't
+	// cause us to select on a nil channel.
+	c.mu.RLock()
+	done := c.done
+	c.mu.RUnlock()
 
-	c.logger.Debug("refreshing mqtt url")
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			c.mu.RLock()
+			remaining := time.Until(c.mqttURLExpires)
+			buffer := c.tokenRefreshBuffer
+			c.mu.RUnlock()
+
+			if remaining > buffer {
+				continue
+			}
+			c.logger.Info("mqtt url expiring, reconnecting", "remaining", remaining.String())
+			if err := c.reconnectMQTT(); err != nil {
+				c.logger.Error("mqtt reconnect failed", "error", err)
+			}
+		}
+	}
+}
+
+// reconnectMQTT gets fresh MQTT credentials, disconnects the old client,
+// and establishes a new connection. Subscriptions are restored automatically
+// via the handleConnect callback.
+func (c *Client) reconnectMQTT() error {
+	ctx := context.Background()
+
 	signedURL, expiresAt, err := c.getMQTTCredentials(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("get mqtt credentials: %w", err)
+	}
+
+	parsed, err := url.Parse(signedURL)
+	if err != nil {
+		return fmt.Errorf("parse mqtt url: %w", err)
+	}
+
+	broker := fmt.Sprintf("wss://%s%s?%s", parsed.Host, parsed.Path, parsed.RawQuery)
+
+	// Disconnect the old client.
+	c.mu.Lock()
+	if c.mqttClient != nil && c.mqttClient.IsConnected() {
+		c.mqttClient.Disconnect(250)
 	}
 	c.mqttURL = signedURL
 	c.mqttURLExpires = expiresAt
+	c.mu.Unlock()
+
+	// Create and connect a new client with the fresh URL.
+	opts := mqtt.NewClientOptions()
+	opts.AddBroker(broker)
+	opts.SetClientID(c.mqttUUID)
+	opts.SetTLSConfig(&tls.Config{InsecureSkipVerify: true}) //nolint:gosec // Traeger's MQTT broker requires this
+	opts.SetOnConnectHandler(c.handleConnect)
+	opts.SetAutoReconnect(true)
+
+	newClient := mqtt.NewClient(opts)
+	token := newClient.Connect()
+	token.Wait()
+	if err := token.Error(); err != nil {
+		return fmt.Errorf("mqtt connect: %w", err)
+	}
+
+	c.mu.Lock()
+	c.mqttClient = newClient
+	c.mu.Unlock()
+
+	c.logger.Info("mqtt reconnected with fresh url", "expires_in", time.Until(expiresAt).String())
 	return nil
 }
 

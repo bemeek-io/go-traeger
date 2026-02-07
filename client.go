@@ -53,6 +53,7 @@ type Client struct {
 	tokenRefreshBuffer  time.Duration
 	statusUpdateTimeout time.Duration
 	connected           bool
+	done                chan struct{}
 
 	// Internal URL overrides for testing.
 	authURL string
@@ -150,7 +151,10 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	c.mu.Lock()
 	c.connected = true
+	c.done = make(chan struct{})
 	c.mu.Unlock()
+
+	go c.mqttKeepAlive()
 
 	c.logger.Info("connected successfully")
 	return nil
@@ -159,11 +163,16 @@ func (c *Client) Connect(ctx context.Context) error {
 // Close disconnects the MQTT client and cleans up resources.
 func (c *Client) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	if !c.connected {
+		c.mu.Unlock()
+		return nil
+	}
 	c.connected = false
+	close(c.done)
 	if c.mqttClient != nil && c.mqttClient.IsConnected() {
 		c.mqttClient.Disconnect(250)
 	}
+	c.mu.Unlock()
 	c.logger.Info("disconnected")
 	return nil
 }

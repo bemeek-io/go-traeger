@@ -390,6 +390,7 @@ func TestNewClientOptions(t *testing.T) {
 func TestClose(t *testing.T) {
 	c := NewClient("user", "pass")
 	c.connected = true
+	c.done = make(chan struct{})
 
 	err := c.Close()
 	if err != nil {
@@ -403,11 +404,26 @@ func TestClose(t *testing.T) {
 func TestCloseWithNilMQTT(t *testing.T) {
 	c := NewClient("user", "pass")
 	c.connected = true
+	c.done = make(chan struct{})
 	c.mqttClient = nil
 
 	err := c.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestCloseIdempotent(t *testing.T) {
+	c := NewClient("user", "pass")
+	c.connected = true
+	c.done = make(chan struct{})
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	// Second close should be a no-op, not panic on double-close.
+	if err := c.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
 	}
 }
 
@@ -1381,30 +1397,101 @@ func TestSubscribeToGrillsNotConnected(t *testing.T) {
 	}
 }
 
-func TestRefreshMQTTURLSkipsWhenFresh(t *testing.T) {
+func TestMQTTKeepAliveSkipsWhenFresh(t *testing.T) {
 	c := NewClient("user", "pass")
-	c.token = "tok"
-	c.tokenExpires = time.Now().Add(1 * time.Hour)
+	c.done = make(chan struct{})
 	c.mqttURLExpires = time.Now().Add(30 * time.Minute)
 
-	err := c.refreshMQTTURL(context.Background())
-	if err != nil {
-		t.Fatalf("refreshMQTTURL: %v", err)
+	// Close immediately so the goroutine exits after one tick.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(c.done)
+	}()
+	c.mqttKeepAlive()
+
+	// URL shouldn't have changed since it's still fresh.
+	if c.mqttURL != "" {
+		t.Errorf("mqttURL should be empty (unchanged), got %q", c.mqttURL)
 	}
 }
 
-func TestRefreshMQTTURLRefreshesWhenExpired(t *testing.T) {
+func TestMQTTKeepAliveStopsOnClose(t *testing.T) {
+	c := NewClient("user", "pass")
+	c.done = make(chan struct{})
+	c.mqttURLExpires = time.Now().Add(30 * time.Minute)
+
+	done := make(chan struct{})
+	go func() {
+		c.mqttKeepAlive()
+		close(done)
+	}()
+
+	close(c.done)
+
+	select {
+	case <-done:
+		// Goroutine exited as expected.
+	case <-time.After(2 * time.Second):
+		t.Fatal("mqttKeepAlive did not stop after done was closed")
+	}
+}
+
+func TestCloseStopsKeepAlive(t *testing.T) {
+	c := NewClient("user", "pass")
+	c.done = make(chan struct{})
+	c.connected = true
+	c.mqttURLExpires = time.Now().Add(30 * time.Minute)
+
+	exited := make(chan struct{})
+	go func() {
+		c.mqttKeepAlive()
+		close(exited)
+	}()
+
+	// Let the goroutine start and capture the done channel.
+	time.Sleep(10 * time.Millisecond)
+
+	c.Close()
+
+	select {
+	case <-exited:
+		// Goroutine exited as expected.
+	case <-time.After(2 * time.Second):
+		t.Fatal("mqttKeepAlive did not stop after Close")
+	}
+}
+
+func TestReconnectMQTTCredentialsFail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	c := NewClient("user", "pass", WithHTTPClient(srv.Client()))
+	c.apiURL = srv.URL
+	c.token = "tok"
+	c.tokenExpires = time.Now().Add(1 * time.Hour)
+
+	err := c.reconnectMQTT()
+	if err == nil {
+		t.Fatal("expected error when credentials fail")
+	}
+}
+
+func TestReconnectMQTTConnectFails(t *testing.T) {
 	srv, c := newTestServer(t)
 	defer srv.Close()
 
 	c.token = "tok"
 	c.tokenExpires = time.Now().Add(1 * time.Hour)
-	c.mqttURLExpires = time.Now().Add(-1 * time.Minute) // Expired.
 
-	err := c.refreshMQTTURL(context.Background())
-	if err != nil {
-		t.Fatalf("refreshMQTTURL: %v", err)
+	// reconnectMQTT will get valid credentials but fail to connect to
+	// wss://example.com/mqtt (not a real broker).
+	err := c.reconnectMQTT()
+	if err == nil {
+		t.Fatal("expected error when MQTT connect fails")
 	}
+	// Credentials should have been updated even though connect failed.
 	if c.mqttURL != "wss://example.com/mqtt?sig=test" {
 		t.Errorf("mqttURL = %q, want wss://example.com/mqtt?sig=test", c.mqttURL)
 	}

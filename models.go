@@ -81,9 +81,9 @@ type GrillStatus struct {
 	InCustom  int `json:"in_custom"`
 
 	// Cook timer
-	CookTimerStart    int64 `json:"cook_timer_start"`
-	CookTimerEnd      int64 `json:"cook_timer_end"`
-	CookTimerComplete int   `json:"cook_timer_complete"`
+	CookTimerStart    int64  `json:"cook_timer_start"`
+	CookTimerEnd      int64  `json:"cook_timer_end"`
+	CookTimerComplete int    `json:"cook_timer_complete"`
 	CookID            string `json:"cook_id"`
 
 	// System timer (preheat countdown, etc.)
@@ -151,7 +151,7 @@ type userDataResponse struct {
 
 // mqttConnectionResponse wraps the MQTT connection API response.
 type mqttConnectionResponse struct {
-	SignedURL          string  `json:"signedUrl"`
+	SignedURL         string  `json:"signedUrl"`
 	ExpirationSeconds float64 `json:"expirationSeconds"`
 }
 
