@@ -37,7 +37,7 @@ func (c *Client) connectMQTT(ctx context.Context) error {
 	opts.SetOnConnectHandler(c.handleConnect)
 	opts.SetAutoReconnect(true)
 
-	c.mqttClient = mqtt.NewClient(opts)
+	c.mqttClient = c.newMQTTClient(opts)
 
 	token := c.mqttClient.Connect()
 	token.Wait()
@@ -58,7 +58,7 @@ func (c *Client) mqttKeepAlive() {
 	done := c.done
 	c.mu.RUnlock()
 
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(c.keepAliveInterval)
 	defer ticker.Stop()
 
 	for {
@@ -117,7 +117,7 @@ func (c *Client) reconnectMQTT() error {
 	opts.SetOnConnectHandler(c.handleConnect)
 	opts.SetAutoReconnect(true)
 
-	newClient := mqtt.NewClient(opts)
+	newClient := c.newMQTTClient(opts)
 	token := newClient.Connect()
 	token.Wait()
 	if err := token.Error(); err != nil {

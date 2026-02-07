@@ -52,12 +52,14 @@ type Client struct {
 
 	tokenRefreshBuffer  time.Duration
 	statusUpdateTimeout time.Duration
+	keepAliveInterval   time.Duration
 	connected           bool
 	done                chan struct{}
 
-	// Internal URL overrides for testing.
-	authURL string
-	apiURL  string
+	// Internal overrides for testing.
+	authURL       string
+	apiURL        string
+	newMQTTClient func(opts *mqtt.ClientOptions) mqtt.Client
 }
 
 // Option configures the Client.
@@ -113,8 +115,10 @@ func NewClient(username, password string, opts ...Option) *Client {
 		logger:              nopLogger{},
 		tokenRefreshBuffer:  60 * time.Second,
 		statusUpdateTimeout: 10 * time.Second,
+		keepAliveInterval:   30 * time.Second,
 		authURL:             authEndpoint,
 		apiURL:              apiBaseURL,
+		newMQTTClient:       mqtt.NewClient,
 	}
 	for _, opt := range opts {
 		opt(c)

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 // ── Test helpers ─────────────────────────────────────────────────────
@@ -28,6 +30,45 @@ func (m *fakeMessage) Topic() string     { return m.topic }
 func (m *fakeMessage) MessageID() uint16 { return 0 }
 func (m *fakeMessage) Payload() []byte   { return m.payload }
 func (m *fakeMessage) Ack()              {}
+
+// fakeToken implements mqtt.Token for testing.
+type fakeToken struct {
+	err error
+}
+
+func (t *fakeToken) Wait() bool                     { return true }
+func (t *fakeToken) WaitTimeout(time.Duration) bool { return true }
+func (t *fakeToken) Done() <-chan struct{}          { ch := make(chan struct{}); close(ch); return ch }
+func (t *fakeToken) Error() error                   { return t.err }
+
+// fakeMQTTClient implements mqtt.Client for testing.
+type fakeMQTTClient struct {
+	connected       bool
+	subscriptions   []string
+	disconnectCalls int
+	connectErr      error
+	subscribeErr    error
+}
+
+func (f *fakeMQTTClient) IsConnected() bool       { return f.connected }
+func (f *fakeMQTTClient) IsConnectionOpen() bool  { return f.connected }
+func (f *fakeMQTTClient) Connect() mqtt.Token     { return &fakeToken{err: f.connectErr} }
+func (f *fakeMQTTClient) Disconnect(quiesce uint) { f.disconnectCalls++ }
+func (f *fakeMQTTClient) Publish(topic string, qos byte, retained bool, payload interface{}) mqtt.Token {
+	return &fakeToken{}
+}
+func (f *fakeMQTTClient) Subscribe(topic string, qos byte, callback mqtt.MessageHandler) mqtt.Token {
+	f.subscriptions = append(f.subscriptions, topic)
+	return &fakeToken{err: f.subscribeErr}
+}
+func (f *fakeMQTTClient) SubscribeMultiple(filters map[string]byte, callback mqtt.MessageHandler) mqtt.Token {
+	return &fakeToken{}
+}
+func (f *fakeMQTTClient) Unsubscribe(topics ...string) mqtt.Token             { return &fakeToken{} }
+func (f *fakeMQTTClient) AddRoute(topic string, callback mqtt.MessageHandler) {}
+func (f *fakeMQTTClient) OptionsReader() mqtt.ClientOptionsReader {
+	return mqtt.NewClient(mqtt.NewClientOptions()).OptionsReader()
+}
 
 // testLogger captures log calls for verification.
 type testLogger struct {
@@ -1312,6 +1353,32 @@ func TestHandleMessageFullPayload(t *testing.T) {
 
 // ── Connect tests ────────────────────────────────────────────────────
 
+func TestConnectSuccess(t *testing.T) {
+	srv, c := newTestServer(t)
+	defer srv.Close()
+
+	fake := &fakeMQTTClient{connected: true}
+	c.newMQTTClient = func(opts *mqtt.ClientOptions) mqtt.Client { return fake }
+
+	err := c.Connect(context.Background())
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer c.Close()
+
+	if !c.connected {
+		t.Error("connected should be true after Connect")
+	}
+	grills := c.Grills()
+	if len(grills) != 2 {
+		t.Errorf("expected 2 grills, got %d", len(grills))
+	}
+	// subscribeToGrills should have been called.
+	if len(fake.subscriptions) != 2 {
+		t.Errorf("expected 2 subscriptions, got %d", len(fake.subscriptions))
+	}
+}
+
 func TestConnectAuthFailure(t *testing.T) {
 	srv, c := newTestServer(t)
 	defer srv.Close()
@@ -1397,9 +1464,65 @@ func TestSubscribeToGrillsNotConnected(t *testing.T) {
 	}
 }
 
+func TestSubscribeToGrillsSuccess(t *testing.T) {
+	fake := &fakeMQTTClient{connected: true}
+	c := NewClient("user", "pass")
+	c.mqttClient = fake
+	c.grills = []Grill{
+		{ThingName: "GRILL001", FriendlyName: "Test"},
+		{ThingName: "GRILL002", FriendlyName: "Patio"},
+	}
+
+	err := c.subscribeToGrills()
+	if err != nil {
+		t.Fatalf("subscribeToGrills: %v", err)
+	}
+	if len(fake.subscriptions) != 2 {
+		t.Fatalf("subscribed to %d topics, want 2", len(fake.subscriptions))
+	}
+	if fake.subscriptions[0] != "prod/thing/update/GRILL001" {
+		t.Errorf("sub[0] = %q, want %q", fake.subscriptions[0], "prod/thing/update/GRILL001")
+	}
+	if fake.subscriptions[1] != "prod/thing/update/GRILL002" {
+		t.Errorf("sub[1] = %q, want %q", fake.subscriptions[1], "prod/thing/update/GRILL002")
+	}
+}
+
+func TestSubscribeToGrillsError(t *testing.T) {
+	fake := &fakeMQTTClient{connected: true, subscribeErr: fmt.Errorf("subscribe failed")}
+	c := NewClient("user", "pass")
+	c.mqttClient = fake
+	c.grills = []Grill{{ThingName: "G1"}}
+
+	err := c.subscribeToGrills()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "subscribe") {
+		t.Errorf("error should mention subscribe: %v", err)
+	}
+}
+
+func TestCloseDisconnectsMQTT(t *testing.T) {
+	fake := &fakeMQTTClient{connected: true}
+	c := NewClient("user", "pass")
+	c.connected = true
+	c.done = make(chan struct{})
+	c.mqttClient = fake
+
+	err := c.Close()
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if fake.disconnectCalls != 1 {
+		t.Errorf("Disconnect called %d times, want 1", fake.disconnectCalls)
+	}
+}
+
 func TestMQTTKeepAliveSkipsWhenFresh(t *testing.T) {
 	c := NewClient("user", "pass")
 	c.done = make(chan struct{})
+	c.keepAliveInterval = 10 * time.Millisecond
 	c.mqttURLExpires = time.Now().Add(30 * time.Minute)
 
 	// Close immediately so the goroutine exits after one tick.
@@ -1412,6 +1535,49 @@ func TestMQTTKeepAliveSkipsWhenFresh(t *testing.T) {
 	// URL shouldn't have changed since it's still fresh.
 	if c.mqttURL != "" {
 		t.Errorf("mqttURL should be empty (unchanged), got %q", c.mqttURL)
+	}
+}
+
+func TestMQTTKeepAliveTriggersReconnect(t *testing.T) {
+	srv, c := newTestServer(t)
+	defer srv.Close()
+
+	c.token = "tok"
+	c.tokenExpires = time.Now().Add(1 * time.Hour)
+	c.done = make(chan struct{})
+	c.keepAliveInterval = 10 * time.Millisecond
+	// URL already expired → reconnect should trigger on first tick.
+	c.mqttURLExpires = time.Now().Add(-1 * time.Minute)
+	l := &testLogger{}
+	c.logger = l
+
+	exited := make(chan struct{})
+	go func() {
+		c.mqttKeepAlive()
+		close(exited)
+	}()
+
+	// Wait long enough for the ticker to fire and reconnect to be attempted.
+	time.Sleep(100 * time.Millisecond)
+	close(c.done)
+
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("mqttKeepAlive did not exit")
+	}
+
+	// reconnectMQTT was called (it will fail at MQTT connect since
+	// wss://example.com/mqtt isn't real, but it exercises the code path).
+	if l.infoCalls == 0 {
+		t.Error("expected info log for mqtt url expiring")
+	}
+	if l.errorCalls == 0 {
+		t.Error("expected error log for reconnect failure")
+	}
+	// The credentials were fetched and URL was updated before the connect failed.
+	if c.mqttURL != "wss://example.com/mqtt?sig=test" {
+		t.Errorf("mqttURL = %q, want wss://example.com/mqtt?sig=test", c.mqttURL)
 	}
 }
 
@@ -1458,6 +1624,43 @@ func TestCloseStopsKeepAlive(t *testing.T) {
 		// Goroutine exited as expected.
 	case <-time.After(2 * time.Second):
 		t.Fatal("mqttKeepAlive did not stop after Close")
+	}
+}
+
+func TestReconnectMQTTSuccess(t *testing.T) {
+	srv, c := newTestServer(t)
+	defer srv.Close()
+
+	c.token = "tok"
+	c.tokenExpires = time.Now().Add(1 * time.Hour)
+
+	oldFake := &fakeMQTTClient{connected: true}
+	c.mqttClient = oldFake
+
+	newFake := &fakeMQTTClient{connected: true}
+	c.newMQTTClient = func(opts *mqtt.ClientOptions) mqtt.Client { return newFake }
+
+	l := &testLogger{}
+	c.logger = l
+
+	err := c.reconnectMQTT()
+	if err != nil {
+		t.Fatalf("reconnectMQTT: %v", err)
+	}
+
+	// Old client should have been disconnected.
+	if oldFake.disconnectCalls != 1 {
+		t.Errorf("old client disconnect called %d times, want 1", oldFake.disconnectCalls)
+	}
+	// New client should be set.
+	if c.mqttClient != newFake {
+		t.Error("mqttClient should be the new fake client")
+	}
+	if c.mqttURL != "wss://example.com/mqtt?sig=test" {
+		t.Errorf("mqttURL = %q", c.mqttURL)
+	}
+	if l.infoCalls == 0 {
+		t.Error("expected info log for successful reconnect")
 	}
 }
 
